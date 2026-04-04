@@ -22,11 +22,18 @@ import functools
 import os
 import time
 from logging import getLogger
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 import anyio
 import openai
+from openai import AsyncStream
+from openai.types import Completion
+from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from tenacity import retry, retry_if_exception_type, stop, wait
+
+if TYPE_CHECKING:
+    from verda import VerdaClient
+    from verda.types import Deployment, DeploymentTemplate
 
 from dspy.clients._openai import (
     _TRANSIENT,
@@ -35,7 +42,7 @@ from dspy.clients._openai import (
     _prepare,
     normalize_chunk,
 )
-from dspy.clients._request_utils import acall_with_retries, call_with_retries
+from dspy.clients._request_utils import StreamChunk, acall_with_retries, call_with_retries
 from dspy.clients.openai import OpenAIProvider
 
 log = getLogger(__name__)
@@ -66,24 +73,29 @@ class VerdaBackend:
     def __init__(
         self,
         deployment_name: str | None = None,
-        deployment: Any | None = None,
-        deployment_template: Any | None = None,
-        verda_client: Any | None = None,
+        deployment: Deployment | None = None,
+        deployment_template: DeploymentTemplate | None = None,
+        verda_client: VerdaClient | None = None,
         client_id: str | None = None,
         client_secret: str | None = None,
         inference_key: str | None = None,
         verda_base_url: str = "https://api.verda.com/v1",
         readiness_timeout_seconds: float = 900.0,
         poll_interval_seconds: float = 15.0,
+        *,
+        # Capability configuration - defaults assume modern vLLM/SGLang deployments
+        supports_function_calling: bool = True,
+        supports_reasoning: bool = False,
+        supports_response_schema: bool = True,
     ):
         # Lifecycle state
         self._endpoint_online: anyio.Event = anyio.Event()
         self._bootstrap_lock: anyio.Lock = anyio.Lock()
 
         # Deployment state
-        self._deployment = deployment
-        self._deployment_template = deployment_template
-        self._deployment_name = (
+        self._deployment: Deployment | None = deployment
+        self._deployment_template: DeploymentTemplate | None = deployment_template
+        self._deployment_name: str | None = (
             deployment_name or getattr(deployment, "name", None) or getattr(deployment_template, "name", None)
         )
         self._deployment_status: str | None = None
@@ -97,7 +109,7 @@ class VerdaBackend:
             raise ValueError("inference_key is required (or set VERDA_INFERENCE_KEY)")
 
         # Client
-        self._verda = verda_client
+        self._verda: VerdaClient | None = verda_client
         if self._verda is None:
             self._verda = self._build_client(
                 client_id or os.getenv("VERDA_CLIENT_ID"),
@@ -105,10 +117,12 @@ class VerdaBackend:
                 verda_base_url,
             )
 
-        # OpenAI client for inference (created when endpoint is ready)
-        self._openai_client: openai.AsyncOpenAI | None = None
+        # Capabilities (configurable per deployment)
+        self._supports_function_calling = supports_function_calling
+        self._supports_reasoning = supports_reasoning
+        self._supports_response_schema = supports_response_schema
 
-    def _build_client(self, client_id: str | None, client_secret: str | None, base_url: str) -> Any:
+    def _build_client(self, client_id: str | None, client_secret: str | None, base_url: str) -> VerdaClient | None:
         if not client_id or not client_secret:
             return None  # Can't create client without credentials
 
@@ -139,15 +153,15 @@ class VerdaBackend:
             self._endpoint_online = anyio.Event()
 
     # ── Backend protocol: capability queries ─────────────────────────────
-    # Note: this needs to be implemented and depends on the Deployment utilized
+
     def supports_function_calling(self, model: str) -> bool:
-        return True
+        return self._supports_function_calling
 
     def supports_reasoning(self, model: str) -> bool:
-        return True
+        return self._supports_reasoning
 
     def supports_response_schema(self, model: str) -> bool:
-        return True
+        return self._supports_response_schema
 
     def supported_params(self, model: str) -> set[str]:
         return {
@@ -172,18 +186,27 @@ class VerdaBackend:
 
     # ── Backend protocol: completion ─────────────────────────────────────
 
-    def complete_request(self, request: dict[str, Any], model_type: str, num_retries: int):
-        """Sync completion - runs async version via syncify."""
+    def complete_request(
+        self, request: dict[str, Any], model_type: str, num_retries: int
+    ) -> ChatCompletion | Completion:
+        """Sync completion - runs async version via syncify.
+
+        TODO: Verify behavior in nested event loop contexts (e.g., Jupyter).
+        The asyncer.syncify wrapper should handle most cases, but edge cases
+        with existing event loops may need investigation.
+        """
         import asyncer
 
         return asyncer.syncify(self.acomplete_request)(request, model_type, num_retries)
 
-    async def acomplete_request(self, request: dict[str, Any], model_type: str, num_retries: int):
+    async def acomplete_request(
+        self, request: dict[str, Any], model_type: str, num_retries: int
+    ) -> ChatCompletion | Completion:
         """Async completion with transparent lifecycle management."""
         await self._ensure_endpoint()  # TRANSPARENT!
         return await self._openai_acomplete(request, model_type, num_retries)
 
-    async def astream_complete(self, request: dict[str, Any], num_retries: int):
+    async def astream_complete(self, request: dict[str, Any], num_retries: int) -> _VerdaStreamWrapper:
         """Streaming completion with transparent lifecycle."""
         await self._ensure_endpoint()
         request = _prepare(request)
@@ -195,7 +218,9 @@ class VerdaBackend:
         stream = await acall_with_retries(client.chat.completions.create, num_retries, _TRANSIENT, **request)
         return _VerdaStreamWrapper(stream)
 
-    async def _openai_acomplete(self, request: dict[str, Any], model_type: str, num_retries: int):
+    async def _openai_acomplete(
+        self, request: dict[str, Any], model_type: str, num_retries: int
+    ) -> ChatCompletion | Completion:
         """Delegate to OpenAI-compatible API."""
         request = _prepare(request)
         request["api_base"] = self._endpoint_url
@@ -304,7 +329,7 @@ class VerdaBackend:
         self._deployment_status = self._normalize_status(status)
         return self._deployment_status
 
-    async def _find_endpoint(self) -> Any | None:
+    async def _find_endpoint(self) -> Deployment | None:
         """Find an existing Verda deployment."""
         if self._verda is None:
             return self._deployment
@@ -326,7 +351,7 @@ class VerdaBackend:
 
         return None
 
-    async def _create_endpoint(self) -> Any:
+    async def _create_endpoint(self) -> Deployment:
         """Create a new Verda deployment from template."""
         if self._deployment_template is None:
             raise RuntimeError(f"No deployment {self._deployment_name!r} found and no deployment_template provided")
@@ -384,24 +409,26 @@ class VerdaBackend:
         await self.aclose()
 
     async def aclose(self) -> None:
-        """Clean up resources. Does NOT pause the deployment."""
-        if self._openai_client is not None:
-            await self._openai_client.close()
-            self._openai_client = None
+        """Clean up resources. Does NOT pause the deployment.
+
+        Note: OpenAI clients are created per-request via _make_client() and
+        cleaned up automatically. No explicit client cleanup needed here.
+        """
+        pass
 
 
 class _VerdaStreamWrapper:
     """Wraps an OpenAI stream, normalizing chunks and collecting them."""
 
-    def __init__(self, stream):
-        self._stream = stream
-        self._raw_chunks: list = []
-        self.assembled = None
+    def __init__(self, stream: AsyncStream[ChatCompletionChunk]) -> None:
+        self._stream: AsyncStream[ChatCompletionChunk] = stream
+        self._raw_chunks: list[ChatCompletionChunk] = []
+        self.assembled: ChatCompletion | None = None
 
-    def __aiter__(self):
+    def __aiter__(self) -> Self:
         return self
 
-    async def __anext__(self):
+    async def __anext__(self) -> StreamChunk:
         try:
             raw = await self._stream.__anext__()
         except StopAsyncIteration:
