@@ -39,6 +39,7 @@ dependencies = [
     "xxhash>=3.5.0",
     "gepa[dspy]==0.0.27",
     "typeguard==4.4.3",
+    "verda>=1.24.0",
 ]
 
 [project.optional-dependencies]
@@ -167,6 +168,12 @@ quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
+
+[dependency-groups]
+dev = [
+    "ipython-autoimport>=0.5.1",
+    "ipython-autotime>=0.3.2",
+]
 
 [tool.ruff.lint.isort]
 known-first-party = ["dspy"]

@@ -472,6 +472,10 @@ class LM(BaseLM):
             job.set_result(err)
 
     def infer_provider(self) -> Provider:
+        from dspy.clients._verda import VerdaProvider
+
+        if VerdaProvider.is_provider_model(self.model):
+            return VerdaProvider()
         if OpenAIProvider.is_provider_model(self.model):
             return OpenAIProvider()
         return Provider()
