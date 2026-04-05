@@ -1,6 +1,6 @@
 import inspect
 import logging
-from typing import Callable, TypeVar
+from typing import Callable
 
 import dspy
 from dspy.adapters.types.tool import Tool
@@ -11,15 +11,12 @@ from dspy.signatures.signature import Signature, ensure_signature
 
 logger = logging.getLogger(__name__)
 
-TInput = TypeVar("TInput")
-TOutput = TypeVar("TOutput")
-
 class CodeAct(ReAct, ProgramOfThought):
     """
     CodeAct is a module that utilizes the Code Interpreter and predefined tools to solve the problem.
     """
 
-    def __init__(self, signature: str | type[Signature] | type[Signature[TInput, TOutput]], tools: list[Callable], max_iters: int = 5, interpreter: PythonInterpreter | None = None):
+    def __init__(self, signature: str | type[Signature], tools: list[Callable], max_iters: int = 5, interpreter: PythonInterpreter | None = None):
         """
         Initializes the CodeAct class with the specified model, temperature, and max tokens.
 

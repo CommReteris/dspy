@@ -23,7 +23,7 @@ import sys
 import types
 import typing
 from copy import deepcopy
-from typing import Any, Generic, Iterator, TypeVar, overload
+from typing import Any, Iterator
 
 from pydantic import BaseModel, Field, create_model
 from pydantic.fields import FieldInfo
@@ -41,19 +41,6 @@ def _default_instructions(cls) -> str:
 class SignatureMeta(type(BaseModel)):
     def __call__(cls, *args, **kwargs):
         if cls is Signature:
-            input_type = kwargs.get("input_type")
-            output_type = kwargs.get("output_type")
-
-            if (input_type is None) != (output_type is None):
-                raise ValueError(
-                    "You must provide both 'input_type' and 'output_type' to create a typed signature. "
-                    "Signature instantiated with only one."
-                )
-
-            if input_type is not None and output_type is not None:
-                instructions = kwargs.get("instructions", None)
-                return cls._create_typed_signature(input_type, output_type, instructions=instructions)
-
             # We don't create an actual Signature instance, instead, we create a new Signature class.
             custom_types = kwargs.pop("custom_types", None)
 
@@ -273,25 +260,11 @@ class SignatureMeta(type(BaseModel)):
         return f"{cls.__name__}({cls.signature}\n    instructions={cls.instructions!r}\n    {field_repr}\n)"
 
 
-TInput = TypeVar("TInput", bound=Any)
-TOutput = TypeVar("TOutput", bound=Any)
-
-class Signature(BaseModel, Generic[TInput, TOutput], metaclass=SignatureMeta):
+class Signature(BaseModel, metaclass=SignatureMeta):
     """"""
 
     # Note: Don't put a docstring here, as it will become the default instructions
     # for any signature that doesn't define its own instructions.
-
-    @overload
-    def __new__(cls, input_type: type[TInput], output_type: type[TOutput]) -> "type[Signature[TInput, TOutput]]":
-        ...
-
-    @overload
-    def __new__(cls, *args, **kwargs) -> "type[Signature]":
-        ...
-
-    def __new__(cls, *args, **kwargs):
-        return super().__new__(cls)
 
     @classmethod
     def with_instructions(cls, instructions: str) -> type["Signature"]:
@@ -320,67 +293,7 @@ class Signature(BaseModel, Generic[TInput, TOutput], metaclass=SignatureMeta):
             assert NewSig.instructions == "Translate to French."
             ```
         """
-        return cls._copy_typed_attrs(Signature(cls.fields, instructions))
-
-    @classmethod
-    def _create_typed_signature(
-        cls,
-        input_type: type[TInput],
-        output_type: type[TOutput],
-        *,
-        instructions: str | None = None,
-    ) -> type["Signature[TInput, TOutput]"]:
-        """
-        Creates a new Signature class based on input/output models.
-        """
-        fields = {}
-
-        for model, field_factory, field_type_str in [
-            (input_type, InputField, "input"),
-            (output_type, OutputField, "output")
-        ]:
-            for name, annotation in getattr(model, "__annotations__", {}).items():
-                attr = getattr(model, name, None)
-
-                is_correct_dspy_field = (
-                        isinstance(attr, FieldInfo) and
-                        attr.json_schema_extra is not None
-                )
-
-                # Use the user's field if valid InputField or OutputField, otherwise create a new one using the factory
-                if is_correct_dspy_field:
-                    attr = deepcopy(attr)
-                    attr.json_schema_extra["__dspy_field_type"] = field_type_str
-                field_obj = attr if is_correct_dspy_field else field_factory()
-
-                fields[name] = (annotation, field_obj)
-
-        # Construct the new signature class
-        new_signature_class = type(
-            f"{input_type.__name__}To{output_type.__name__}",
-            (cls,),  # Inherit from Signature
-            {
-                "__annotations__": {k: v[0] for k, v in fields.items()},
-                **{k: v[1] for k, v in fields.items()}
-            }
-        )
-
-        if instructions is not None:
-            new_signature_class.__doc__ = instructions
-
-        # Attach the original types
-        new_signature_class.input_type = input_type
-        new_signature_class.output_type = output_type
-
-        return typing.cast(type["Signature[type[TInput], type[TOutput]]"], new_signature_class)
-
-    @classmethod
-    def _copy_typed_attrs(cls, target: "type[Signature]") -> "type[Signature]":
-        """Copy ``input_type`` / ``output_type`` from this class to *target*, if present."""
-        for attr in ("input_type", "output_type"):
-            if hasattr(cls, attr):
-                setattr(target, attr, getattr(cls, attr))
-        return target
+        return Signature(cls.fields, instructions)
 
     @classmethod
     def with_updated_fields(cls, name: str, type_: type | None = None, **kwargs: dict[str, Any]) -> type["Signature"]:
@@ -406,7 +319,7 @@ class Signature(BaseModel, Generic[TInput, TOutput], metaclass=SignatureMeta):
         }
         if type_ is not None:
             fields_copy[name].annotation = type_
-        return cls._copy_typed_attrs(Signature(fields_copy, cls.instructions))
+        return Signature(fields_copy, cls.instructions)
 
     @classmethod
     def prepend(cls, name, field, type_=None) -> type["Signature"]:
@@ -495,7 +408,7 @@ class Signature(BaseModel, Generic[TInput, TOutput], metaclass=SignatureMeta):
 
         fields.pop(name, None)
 
-        return cls._copy_typed_attrs(Signature(fields, cls.instructions))
+        return Signature(fields, cls.instructions)
 
     @classmethod
     def insert(cls, index: int, name: str, field, type_: type | None = None) -> type["Signature"]:
@@ -554,7 +467,7 @@ class Signature(BaseModel, Generic[TInput, TOutput], metaclass=SignatureMeta):
         lst.insert(index, (name, (type_, field)))
 
         new_fields = dict(input_fields + output_fields)
-        return cls._copy_typed_attrs(Signature(new_fields, cls.instructions))
+        return Signature(new_fields, cls.instructions)
 
     @classmethod
     def equals(cls, other) -> bool:
@@ -585,7 +498,7 @@ class Signature(BaseModel, Generic[TInput, TOutput], metaclass=SignatureMeta):
 
     @classmethod
     def load_state(cls, state):
-        signature_copy = cls._copy_typed_attrs(Signature(deepcopy(cls.fields), cls.instructions))
+        signature_copy = Signature(deepcopy(cls.fields), cls.instructions)
 
         signature_copy.instructions = state["instructions"]
         for field, saved_field in zip(signature_copy.fields.values(), state["fields"], strict=False):
@@ -595,7 +508,7 @@ class Signature(BaseModel, Generic[TInput, TOutput], metaclass=SignatureMeta):
         return signature_copy
 
 
-def ensure_signature(signature: str | type[Signature], instructions=None) -> None | Signature | type[Signature]:
+def ensure_signature(signature: str | type[Signature], instructions=None) -> None | type[Signature]:
     if signature is None:
         return None
     if isinstance(signature, str):

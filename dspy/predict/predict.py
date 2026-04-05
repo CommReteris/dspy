@@ -1,9 +1,8 @@
 import logging
 import random
-from typing import Any, Literal, TypeVar, get_args, get_origin
+from typing import Any, Literal, get_args, get_origin
 
 from pydantic import BaseModel
-from pydantic import ValidationError as PydanticValidationError
 from pydantic_core import PydanticUndefined
 from typeguard import TypeCheckError, check_type
 
@@ -20,8 +19,6 @@ from dspy.utils.constants import IS_TYPE_UNDEFINED
 
 logger = logging.getLogger(__name__)
 
-TInput = TypeVar("TInput")
-TOutput = TypeVar("TOutput")
 UNSAFE_LM_STATE_KEYS = {"api_base", "base_url", "model_list"}
 
 
@@ -43,28 +40,7 @@ def _sanitize_lm_state(lm_state: dict, allow_unsafe_lm_state: bool) -> dict:
     return sanitized_lm_state
 
 
-def _coerce_prediction_to_output_type(pred: Prediction, signature: Signature) -> Any:
-    """Coerce a Prediction to the signature's output_type if available."""
-    output_type = getattr(signature, "output_type", None)
-    if output_type is None:
-        return pred
-
-    output_values = {k: getattr(pred, k) for k in signature.output_fields}
-
-    try:
-        return output_type(**output_values)
-    except (TypeError, PydanticValidationError):
-        # Plain class with no keyword-accepting __init__ — set attributes directly.
-        instance = object.__new__(output_type)
-        for k, v in output_values.items():
-            try:
-                setattr(instance, k, v)
-            except (AttributeError, TypeError):
-                return pred
-        return instance
-
-
-class Predict(Module[TInput, TOutput], Parameter):
+class Predict(Module, Parameter):
     """Basic DSPy module that maps inputs to outputs using a language model.
 
     Args:
@@ -79,7 +55,7 @@ class Predict(Module[TInput, TOutput], Parameter):
                 predict(q="What is 1 + 52?", config={"rollout_id": 2, "temperature": 1.0})
     """
 
-    def __init__(self, signature: str | type[Signature] | type[Signature[TInput, TOutput]], callbacks: list[BaseCallback] | None = None, **config):
+    def __init__(self, signature: str | type[Signature], callbacks: list[BaseCallback] | None = None, **config):
         super().__init__(callbacks=callbacks)
         self.stage = random.randbytes(8).hex()
         self.signature = ensure_signature(signature)
@@ -141,28 +117,21 @@ class Predict(Module[TInput, TOutput], Parameter):
 
     def _get_positional_args_error_message(self):
         input_fields = list(self.signature.input_fields.keys())
-        input_type = getattr(self.signature, "input_type", None)
-        input_type_name = input_type.__name__ if input_type else "TInput"
-
         return (
-            "You may use either positional or keyword arguments when calling `dspy.Predict`, not both.\n"
-            f"- Positional: pass an instance of the input type: `predict({input_type_name}({input_fields[0]}=input_value, ...))`\n"
-            f"- Keyword: pass individual fields: `predict({input_fields[0]}=input_value, ...)`"
+            "Positional arguments are not allowed when calling `dspy.Predict`, must use keyword arguments "
+            f"that match your signature input fields: '{', '.join(input_fields)}'. For example: "
+            f"`predict({input_fields[0]}=input_value, ...)`."
         )
 
-    def __call__(self, arg: TInput | None = None, /, **kwargs) -> TOutput | Prediction:
-        if arg is not None:
-            if kwargs or not hasattr(arg, "__dict__"):
-                raise ValueError(self._get_positional_args_error_message())
-            kwargs = vars(arg)
+    def __call__(self, *args, **kwargs):
+        if args:
+            raise ValueError(self._get_positional_args_error_message())
 
         return super().__call__(**kwargs)
 
-    async def acall(self, arg: TInput | None = None, /, **kwargs) -> TOutput | Prediction:
-        if arg is not None:
-            if kwargs or not hasattr(arg, "__dict__"):
-                raise ValueError(self._get_positional_args_error_message())
-            kwargs = vars(arg)
+    async def acall(self, *args, **kwargs):
+        if args:
+            raise ValueError(self._get_positional_args_error_message())
 
         return await super().acall(**kwargs)
 
@@ -283,8 +252,7 @@ class Predict(Module[TInput, TOutput], Parameter):
             with settings.context(send_stream=None):
                 completions = adapter(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)
 
-        pred = self._forward_postprocess(completions, signature, **kwargs)
-        return _coerce_prediction_to_output_type(pred, signature)
+        return self._forward_postprocess(completions, signature, **kwargs)
 
     async def aforward(self, **kwargs):
         lm, config, signature, demos, kwargs = self._forward_preprocess(**kwargs)
@@ -297,8 +265,7 @@ class Predict(Module[TInput, TOutput], Parameter):
             with settings.context(send_stream=None):
                 completions = await adapter.acall(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)
 
-        pred = self._forward_postprocess(completions, signature, **kwargs)
-        return _coerce_prediction_to_output_type(pred, signature)
+        return self._forward_postprocess(completions, signature, **kwargs)
 
     def update_config(self, **kwargs):
         self.config = {**self.config, **kwargs}
@@ -308,7 +275,6 @@ class Predict(Module[TInput, TOutput], Parameter):
 
     def __repr__(self):
         return f"{self.__class__.__name__}({self.signature})"
-
 
 def _get_type_name(type_annotation) -> str:
     """Helper method to get the name for a type annotation."""
@@ -335,7 +301,6 @@ def _get_type_name(type_annotation) -> str:
         return f"{origin_name}[{args_str}]"
 
     return getattr(origin, "__name__", str(origin))
-
 
 def _is_value_compatible_with_type(value: Any, expected: type) -> bool:
     """Return True if the value matches the expected type hint."""

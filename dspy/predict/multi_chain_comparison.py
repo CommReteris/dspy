@@ -1,15 +1,11 @@
-from typing import TypeVar
-
 from dspy.predict.predict import Predict
 from dspy.primitives.module import Module
 from dspy.signatures import InputField, OutputField
-from dspy.signatures.signature import Signature, ensure_signature
+from dspy.signatures.signature import ensure_signature
 
-TInput = TypeVar("TInput")
-TOutput = TypeVar("TOutput")
 
-class MultiChainComparison(Module[TInput, TOutput]):
-    def __init__(self, signature: str | type[Signature], M=3, temperature=0.7, **config):  # noqa: N803
+class MultiChainComparison(Module):
+    def __init__(self, signature, M=3, temperature=0.7, **config):  # noqa: N803
         super().__init__()
 
         self.M = M

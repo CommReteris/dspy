@@ -1,7 +1,6 @@
 import json
 import logging
 import re
-from typing import TypeVar
 
 import dspy
 from dspy.primitives.code_interpreter import FinalOutput
@@ -11,10 +10,8 @@ from dspy.signatures.signature import Signature, ensure_signature
 
 logger = logging.getLogger(__name__)
 
-TInput = TypeVar("TInput")
-TOutput = TypeVar("TOutput")
 
-class ProgramOfThought(Module[TInput, TOutput]):
+class ProgramOfThought(Module):
     """
     A DSPy module that runs Python programs to solve a problem.
     This module requires deno to be installed. Please install deno following https://docs.deno.com/runtime/getting_started/installation/
@@ -30,7 +27,7 @@ class ProgramOfThought(Module[TInput, TOutput]):
     ```
     """
 
-    def __init__(self, signature: str | type[Signature] | type[Signature[TInput, TOutput]], max_iters: int = 3, interpreter: PythonInterpreter | None = None):
+    def __init__(self, signature: str | type[Signature], max_iters: int = 3, interpreter: PythonInterpreter | None = None):
         """
         Args:
             signature: The signature of the module.

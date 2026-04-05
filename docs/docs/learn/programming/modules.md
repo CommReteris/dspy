@@ -137,31 +137,26 @@ We also have some function-style modules:
     === "Classification"
 
         ```python linenums="1"
-        import pydantic
         from typing import Literal
 
-        class ClassifyInput(pydantic.BaseModel):
-            sentence: str
-
-        class ClassifyOutput:
-            sentiment: Literal['positive', 'negative', 'neutral']
-            confidence: float
-
-        Classify = dspy.Signature(
-            input_type=ClassifyInput,
-            output_type=ClassifyOutput,
-            instructions="Classify sentiment of a given sentence.",
-        )
+        class Classify(dspy.Signature):
+            """Classify sentiment of a given sentence."""
+            
+            sentence: str = dspy.InputField()
+            sentiment: Literal['positive', 'negative', 'neutral'] = dspy.OutputField()
+            confidence: float = dspy.OutputField()
 
         classify = dspy.Predict(Classify)
-        result = classify(ClassifyInput(sentence="This book was super fun to read, though not the last chapter."))
-        print(result.sentiment, result.confidence)
+        classify(sentence="This book was super fun to read, though not the last chapter.")
         ```
-
+        
         **Possible Output:**
 
         ```text
-        positive 0.75
+        Prediction(
+            sentiment='positive',
+            confidence=0.75
+        )
         ```
 
     === "Information Extraction"
