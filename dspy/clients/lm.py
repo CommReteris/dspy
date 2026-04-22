@@ -267,8 +267,8 @@ class LM(BaseLM):
     def _post_process(self, results):
         """Shared post-processing for forward/aforward."""
         self._check_truncation(results)
-        if not getattr(results, "cache_hit", False) and dspy.settings.usage_tracker and hasattr(results, "usage"):
-            settings.usage_tracker.add_usage(self.model, dict(results.usage))
+        if not getattr(results, "cache_hit", False) and dspy.settings.usage_tracker:
+            settings.usage_tracker.add_usage(self.model, dict(getattr(results, "usage", {})))
         return results
 
     def _should_use_streaming(self, backend):

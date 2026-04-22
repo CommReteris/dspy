@@ -1,6 +1,7 @@
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 from dspy.clients.base_lm import BaseLM, inspect_history
 from dspy.clients.cache import Cache
@@ -21,6 +22,8 @@ def configure_cache(
     disk_cache_dir: str | None = DISK_CACHE_DIR,
     disk_size_limit_bytes: int | None = DISK_CACHE_LIMIT,
     memory_max_entries: int = 1000000,
+    restrict_pickle: bool = False,
+    safe_types: list[type[Any]] | None = None,
 ):
     """Configure the cache for DSPy.
 
@@ -31,6 +34,9 @@ def configure_cache(
         disk_size_limit_bytes: The size limit of the on-disk cache.
         memory_max_entries: The maximum number of entries in the in-memory cache. To allow the cache to grow without
                             bounds, set this parameter to `math.inf` or a similar value.
+        restrict_pickle: When True, restrict pickle deserialization to a known-safe
+            set of types. When False (default), use unrestricted pickle.
+        safe_types: Additional types to allow when restrict_pickle is True.
     """
 
     DSPY_CACHE = Cache(
@@ -39,6 +45,8 @@ def configure_cache(
         disk_cache_dir,
         disk_size_limit_bytes,
         memory_max_entries,
+        restrict_pickle=restrict_pickle,
+        safe_types=safe_types,
     )
 
     import dspy
