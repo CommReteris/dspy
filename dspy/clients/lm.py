@@ -92,7 +92,7 @@ def _resolve_backend(model: str, model_type: str):
        will pick it up automatically.  This also lets you override a
        built-in backend if you need to.
     2. Built-in backends matched by prefix (``openai``, ``azure``,
-       ``anthropic``, ``google``, ``gemini``).
+       ``anthropic``, ``google``, ``gemini``, ``claude-code``).
     3. The litellm catch-all backend.
     """
     prefix = model.split("/", 1)[0] if "/" in model else ""
@@ -105,6 +105,10 @@ def _resolve_backend(model: str, model_type: str):
     if prefix in ("openai", "azure") or model.startswith("ft:"):
         from dspy.clients import _openai
         return _openai
+
+    if prefix == "claude-code":
+        from dspy.clients import _claude_code
+        return _claude_code
 
     if prefix == "anthropic":
         from dspy.clients import _anthropic
