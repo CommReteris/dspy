@@ -437,3 +437,22 @@ class ClaudeCodeBackend:
         if self.persistent:
             return await self._query_persistent(request)
         return await self._query_once(request)
+
+
+# ---------------------------------------------------------------------------
+# Module-level backend protocol (used when _resolve_backend returns this module)
+# ---------------------------------------------------------------------------
+
+_default_backend = ClaudeCodeBackend()
+
+
+def complete_request(request: dict[str, Any], model_type: str, num_retries: int) -> ChatCompletion:
+    return _default_backend.complete_request(request, model_type, num_retries)
+
+
+async def acomplete_request(request: dict[str, Any], model_type: str, num_retries: int) -> ChatCompletion:
+    return await _default_backend.acomplete_request(request, model_type, num_retries)
+
+
+async def astream_complete(request: dict[str, Any], num_retries: int) -> _ClaudeCodeStreamWrapper:
+    return await _default_backend.astream_complete(request, num_retries)
