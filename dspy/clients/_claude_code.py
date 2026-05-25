@@ -77,9 +77,16 @@ def supported_params(model: str) -> set[str]:
 # ---------------------------------------------------------------------------
 
 def _strip_prefix(model: str) -> str:
-    """Remove the ``claude-code/`` prefix if present."""
+    """Remove the ``claude-code/`` prefix and normalize the model name.
+
+    Converts shorthand like ``sonnet-4.6`` to the full Claude API model ID
+    ``claude-sonnet-4-6`` so callers can write ``claude-code/sonnet-4.6``
+    instead of ``claude-code/claude-sonnet-4-6``.
+    """
     if model.startswith("claude-code/"):
-        return model[len("claude-code/"):]
+        model = model[len("claude-code/"):]
+    if model and not model.startswith("claude-"):
+        model = "claude-" + model.replace(".", "-")
     return model
 
 
@@ -304,6 +311,11 @@ class ClaudeCodeBackend:
                     usage = msg.usage or {}
                     cost = msg.total_cost_usd
                     structured = msg.structured_output
+                    if msg.is_error:
+                        err_text = msg.result or "\n".join(text_parts) or "unknown error"
+                        if "context" in err_text.lower() and "window" in err_text.lower():
+                            raise ContextWindowError(err_text)
+                        raise Exception(f"Claude Code error: {err_text}")
         except Exception as e:
             if "context" in str(e).lower() and "window" in str(e).lower():
                 raise ContextWindowError(str(e)) from e
