@@ -21,6 +21,7 @@ whichever the local ``claude`` CLI is configured with.
 from __future__ import annotations
 
 import asyncio
+import anyio
 import json
 import logging
 import time
@@ -417,7 +418,7 @@ class ClaudeCodeBackend:
             except Exception as e:
                 last_err = e
                 if attempt < num_retries:
-                    await asyncio.sleep(2 ** attempt)
+                    await anyio.sleep(2 ** attempt)
                     logger.warning("ClaudeCodeBackend retry %d/%d: %s", attempt + 1, num_retries, e)
         raise last_err
 
