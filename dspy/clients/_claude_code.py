@@ -266,8 +266,7 @@ class ClaudeCodeBackend:
             opts_kwargs["disallowed_tools"] = self.disallowed_tools
         if self.cwd:
             opts_kwargs["cwd"] = self.cwd
-        if self.permission_mode != "auto":
-            opts_kwargs["permission_mode"] = self.permission_mode
+        opts_kwargs["permission_mode"] = self.permission_mode
 
         # Structured output via json_schema.
         schema = request.get("response_schema")
