@@ -69,7 +69,7 @@ def supports_response_schema(model: str) -> bool:
 
 
 def supported_params(model: str) -> set[str]:
-    return {"temperature", "max_tokens", "stop", "response_schema"}
+    return {"temperature", "max_tokens", "stop", "response_schema", "effort"}
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +274,10 @@ class ClaudeCodeBackend:
         if self.cwd:
             opts_kwargs["cwd"] = self.cwd
         opts_kwargs["permission_mode"] = self.permission_mode
+
+        effort = request.get("effort")
+        if effort is not None:
+            opts_kwargs["effort"] = effort
 
         # Structured output via json_schema.
         schema = request.get("response_schema")
