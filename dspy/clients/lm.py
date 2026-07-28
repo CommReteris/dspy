@@ -1,3 +1,4 @@
+import inspect
 import logging
 import os
 import re
@@ -10,6 +11,11 @@ import pydantic
 from anyio.streams.memory import MemoryObjectSendStream
 from asyncer import syncify
 from litellm import ContextWindowExceededError as LitellmContextWindowExceededError
+from litellm.exceptions import APIError as LitellmAPIError
+from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
+from litellm.types.utils import ModelResponse, TextCompletionResponse
+from openai import APIConnectionError, APIStatusError
+from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 import dspy
 from dspy.clients.cache import request_cache
@@ -430,22 +436,42 @@ def litellm_text_completion(request: dict[str, Any], num_retries: int, cache: di
     )
 
 
-async def alitellm_completion(request: dict[str, Any], num_retries: int, cache: dict[str, Any] | None = None):
+async def alitellm_completion(
+    request: dict[str, Any],
+    num_retries: int,
+    cache: dict[str, Any] | None = None,
+) -> ModelResponse | TextCompletionResponse | CustomStreamWrapper | None:
     cache = cache or {"no-cache": True, "no-store": True}
     request = dict(request)
     request.pop("rollout_id", None)
     headers = request.pop("headers", None)
     stream_completion = _get_stream_completion_fn(request, cache, sync=False)
-    if stream_completion is None:
-        return await litellm.acompletion(
-            cache=cache,
-            num_retries=num_retries,
-            retry_strategy="exponential_backoff_retry",
-            headers=_add_dspy_identifier_to_headers(headers),
-            **request,
-        )
+    if stream_completion is not None:
+        stream_completion_result = stream_completion()
+        if not inspect.isawaitable(stream_completion_result):
+            raise TypeError("Asynchronous chat completion streaming returned a synchronous result.")
+        stream_response = await stream_completion_result
+        return stream_response
 
-    return await stream_completion()
+    retrying = AsyncRetrying(
+        retry=retry_if_exception(
+            lambda error: isinstance(error, APIConnectionError)
+            or (
+                isinstance(error, LitellmAPIError | APIStatusError)
+                and (error.status_code in (408, 409, 429) or error.status_code >= 500)
+            )
+        ),
+        wait=wait_exponential(multiplier=1, max=10),
+        stop=stop_after_attempt(max(num_retries, 0) + 1),
+        reraise=True,
+    )
+    return await retrying(
+        litellm.acompletion,
+        cache=cache,
+        num_retries=0,
+        headers=_add_dspy_identifier_to_headers(headers),
+        **request,
+    )
 
 
 async def alitellm_text_completion(request: dict[str, Any], num_retries: int, cache: dict[str, Any] | None = None):
