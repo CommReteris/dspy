@@ -131,6 +131,58 @@ def test_disabled_cache_skips_cache_key(monkeypatch):
         dspy.cache = original_cache
 
 
+@pytest.mark.asyncio
+async def test_lm_does_not_cache_an_embedded_provider_error(tmp_path: Path) -> None:
+    original_cache = dspy.cache
+    dspy.clients.configure_cache(
+        enable_disk_cache=True,
+        enable_memory_cache=True,
+        disk_cache_dir=tmp_path / ".disk_cache",
+    )
+    provider_requests: list[dict[str, object]] = []
+
+    async def interrupted_provider(**request: object) -> ModelResponse:
+        provider_requests.append(request)
+        return ModelResponse(
+            id="gen-1788235114-f9GlbGvfZ6sl6aQhZCV0",
+            created=1788235114,
+            model="qwen/qwen3.5-9b",
+            object="chat.completion",
+            choices=[
+                Choices(
+                    finish_reason="stop",
+                    message=Message(role="assistant", content=None, reasoning_content="Incomplete reasoning."),
+                    provider_specific_fields={
+                        "error": {
+                            "code": 502,
+                            "message": (
+                                "Upstream error from Parasail: Stream interrupted: the connection to the upstream "
+                                "model server was lost before the response completed."
+                            ),
+                            "metadata": {"error_type": "provider_unavailable"},
+                        },
+                        "native_finish_reason": "error",
+                    },
+                )
+            ],
+            usage={"prompt_tokens": 8468, "completion_tokens": 5942, "total_tokens": 14410},
+        )
+
+    try:
+        lm = dspy.LM(model="openai/qwen/qwen3.5-9b", cache=True, num_retries=0)
+        with mock.patch("litellm.acompletion", new=interrupted_provider):
+            for _ in range(2):
+                with pytest.raises(dspy.LMServerError) as raised:
+                    await lm.acall("Resolve the supplied quote.")
+                assert raised.value.status == 502
+
+        assert len(provider_requests) == 2
+        assert len(dspy.cache.memory_cache) == 0
+        assert len(dspy.cache.disk_cache) == 0
+    finally:
+        dspy.cache = original_cache
+
+
 def test_rollout_id_bypasses_cache(monkeypatch, tmp_path):
     calls: list[dict] = []
 
@@ -297,7 +349,7 @@ def test_retry_made_on_system_errors():
 
     lm = dspy.LM(model="openai/gpt-4o-mini", max_tokens=250, num_retries=3)
     with mock.patch.object(litellm.OpenAIChatCompletion, "completion", side_effect=mock_create):
-        with pytest.raises(RateLimitError):
+        with pytest.raises(dspy.LMRateLimitError):
             lm("question")
 
     assert retry_tracking[0] == 4
@@ -415,7 +467,7 @@ def test_exponential_backoff_retry():
 
     lm = dspy.LM(model="openai/gpt-3.5-turbo", max_tokens=250, num_retries=3)
     with mock.patch.object(litellm.OpenAIChatCompletion, "completion", side_effect=mock_create):
-        with pytest.raises(RateLimitError):
+        with pytest.raises(dspy.LMRateLimitError):
             lm("question")
 
     # The first retry happens immediately regardless of the configuration

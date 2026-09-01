@@ -4,6 +4,7 @@ import os
 import re
 import threading
 import warnings
+from collections.abc import Mapping
 from typing import Any, Literal, cast
 
 import litellm
@@ -24,7 +25,16 @@ from dspy.clients.provider import Provider, ReinforceJob, TrainingJob
 from dspy.clients.utils_finetune import TrainDataFormat
 from dspy.dsp.utils.settings import settings
 from dspy.utils.callback import BaseCallback
-from dspy.utils.exceptions import ContextWindowExceededError
+from dspy.utils.exceptions import (
+    ContextWindowExceededError,
+    LMError,
+    LMInvalidRequestError,
+    LMProviderError,
+    LMRateLimitError,
+    LMServerError,
+    LMTimeoutError,
+    LMTransportError,
+)
 
 from .base_lm import BaseLM
 
@@ -162,6 +172,31 @@ class LM(BaseLM):
 
         return completion_fn, litellm_cache_args
 
+    def _provider_error(
+        self,
+        error: LitellmAPIError | APIStatusError | APIConnectionError,
+    ) -> LMError:
+        """Translate a provider SDK exception into the corresponding DSPy boundary error."""
+        provider_value = getattr(error, "llm_provider", None)
+        provider = provider_value if isinstance(provider_value, str) else self._provider_name
+        model_value = getattr(error, "model", None)
+        model = model_value if isinstance(model_value, str) else self.model
+        status_value = getattr(error, "status_code", None)
+        status = status_value if isinstance(status_value, int) else None
+        if status == 408:
+            return LMTimeoutError(str(error), model=model, provider=provider, status=status)
+        if isinstance(error, APIConnectionError):
+            return LMTransportError(str(error), model=model, provider=provider)
+        if status == 429:
+            error_type = LMRateLimitError
+        elif status is not None and 400 <= status < 500:
+            error_type = LMInvalidRequestError
+        elif status is not None and status >= 500:
+            error_type = LMServerError
+        else:
+            error_type = LMProviderError
+        return error_type(str(error), model=model, provider=provider, status=status)
+
     def forward(
         self,
         prompt: str | None = None,
@@ -196,6 +231,8 @@ class LM(BaseLM):
             )
         except LitellmContextWindowExceededError as e:
             raise ContextWindowExceededError(model=self.model) from e
+        except (LitellmAPIError, APIStatusError, APIConnectionError) as error:
+            raise self._provider_error(error) from error
 
         self._check_truncation(results)
 
@@ -237,6 +274,8 @@ class LM(BaseLM):
             )
         except LitellmContextWindowExceededError as e:
             raise ContextWindowExceededError(model=self.model) from e
+        except (LitellmAPIError, APIStatusError, APIConnectionError) as error:
+            raise self._provider_error(error) from error
 
         self._check_truncation(results)
 
@@ -388,22 +427,28 @@ def _get_stream_completion_fn(
         return async_stream_completion
 
 
-def litellm_completion(request: dict[str, Any], num_retries: int, cache: dict[str, Any] | None = None):
+def litellm_completion(
+    request: dict[str, Any], num_retries: int, cache: dict[str, Any] | None = None
+) -> ModelResponse | TextCompletionResponse | CustomStreamWrapper | None:
     cache = cache or {"no-cache": True, "no-store": True}
     request = dict(request)
     request.pop("rollout_id", None)
     headers = _add_dspy_identifier_to_headers(request.pop("headers", None))
     stream_completion = _get_stream_completion_fn(request, cache, sync=True, headers=headers)
     if stream_completion is None:
-        return litellm.completion(
+        response = litellm.completion(
             cache=cache,
             num_retries=num_retries,
             retry_strategy="exponential_backoff_retry",
             headers=headers,
             **request,
         )
+        _raise_for_provider_error(response, model=request["model"])
+        return response
 
-    return stream_completion()
+    response = stream_completion()
+    _raise_for_provider_error(response, model=request["model"])
+    return response
 
 
 def litellm_text_completion(request: dict[str, Any], num_retries: int, cache: dict[str, Any] | None = None):
@@ -451,6 +496,7 @@ async def alitellm_completion(
         if not inspect.isawaitable(stream_completion_result):
             raise TypeError("Asynchronous chat completion streaming returned a synchronous result.")
         stream_response = await stream_completion_result
+        _raise_for_provider_error(stream_response, model=request["model"])
         return stream_response
 
     retrying = AsyncRetrying(
@@ -465,13 +511,17 @@ async def alitellm_completion(
         stop=stop_after_attempt(max(num_retries, 0) + 1),
         reraise=True,
     )
-    return await retrying(
-        litellm.acompletion,
-        cache=cache,
-        num_retries=0,
-        headers=_add_dspy_identifier_to_headers(headers),
-        **request,
-    )
+    async for attempt in retrying:
+        with attempt:
+            response = await litellm.acompletion(
+                cache=cache,
+                num_retries=0,
+                headers=_add_dspy_identifier_to_headers(headers),
+                **request,
+            )
+            _raise_for_provider_error(response, model=request["model"])
+            return response
+    raise RuntimeError("The provider retry policy completed without making a request.")
 
 
 async def alitellm_text_completion(request: dict[str, Any], num_retries: int, cache: dict[str, Any] | None = None):
@@ -620,3 +670,35 @@ def _add_dspy_identifier_to_headers(headers: dict[str, Any] | None = None):
         "User-Agent": f"DSPy/{dspy.__version__}",
         **headers,
     }
+
+
+def _raise_for_provider_error(
+    response: ModelResponse | TextCompletionResponse | CustomStreamWrapper | None,
+    *,
+    model: str,
+) -> None:
+    """Raise LiteLLM's provider error when a completion carries an embedded failure."""
+    if not isinstance(response, ModelResponse):
+        return
+    provider = model.partition("/")[0] or "openai"
+    for choice in response.choices:
+        fields = choice.get("provider_specific_fields")
+        if not isinstance(fields, Mapping):
+            continue
+        error = fields.get("error")
+        if fields.get("native_finish_reason") != "error" and not isinstance(error, Mapping):
+            continue
+        status_value = error.get("code") if isinstance(error, Mapping) else None
+        status = status_value if isinstance(status_value, int) and not isinstance(status_value, bool) else 500
+        message_value = error.get("message") if isinstance(error, Mapping) else None
+        message = (
+            message_value
+            if isinstance(message_value, str)
+            else f"Provider returned an error completion {response.id}."
+        )
+        raise LitellmAPIError(
+            status_code=status,
+            message=message,
+            llm_provider=provider,
+            model=model,
+        )

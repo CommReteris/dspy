@@ -2,9 +2,8 @@ import time
 
 import httpx
 import pytest
-from litellm import APIError, LlmProviders
+from litellm import LlmProviders
 from litellm.llms.custom_httpx.http_handler import get_async_httpx_client
-from openai import APIError as OpenAIAPIError
 
 import dspy
 
@@ -37,7 +36,7 @@ async def test_openrouter_gateway_errors_use_exponential_backoff() -> None:
             num_retries=3,
         )
 
-        with pytest.raises(APIError):
+        with pytest.raises(dspy.LMServerError):
             await lm.acall(prompt="Resolve the annotation.")
     finally:
         await openrouter_client.close()
@@ -51,10 +50,18 @@ async def test_openrouter_gateway_errors_use_exponential_backoff() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("status_code", "expected_attempts"),
-    [(429, 2), (400, 1)],
+    ("status_code", "expected_attempts", "error_type"),
+    [
+        (429, 2, dspy.LMRateLimitError),
+        (408, 2, dspy.LMTimeoutError),
+        (400, 1, dspy.LMInvalidRequestError),
+    ],
 )
-async def test_openrouter_only_retries_transient_statuses(status_code: int, expected_attempts: int) -> None:
+async def test_openrouter_only_retries_transient_statuses(
+    status_code: int,
+    expected_attempts: int,
+    error_type: type[dspy.LMProviderError],
+) -> None:
     attempts = 0
 
     def openrouter(request: httpx.Request) -> httpx.Response:
@@ -82,7 +89,7 @@ async def test_openrouter_only_retries_transient_statuses(status_code: int, expe
             num_retries=1,
         )
 
-        with pytest.raises(OpenAIAPIError):
+        with pytest.raises(error_type):
             await lm.acall(prompt="Resolve the annotation.")
     finally:
         await openrouter_client.close()

@@ -15,7 +15,7 @@ from dspy.adapters.utils import (
 from dspy.clients.base_lm import BaseLM
 from dspy.signatures.signature import Signature
 from dspy.utils.callback import BaseCallback
-from dspy.utils.exceptions import AdapterParseError, ContextWindowExceededError
+from dspy.utils.exceptions import AdapterParseError, LMError
 
 field_header_pattern = re.compile(r"\[\[ ## (\w+) ## \]\]")
 
@@ -74,14 +74,9 @@ class ChatAdapter(Adapter):
             # fallback to JSONAdapter
             from dspy.adapters.json_adapter import JSONAdapter
 
-            if (
-                isinstance(e, ContextWindowExceededError)
-                or isinstance(self, JSONAdapter)
-                or not self.use_json_adapter_fallback
-            ):
-                # On context window exceeded error, already using JSONAdapter, or use_json_adapter_fallback is False
-                # we don't want to retry with a different adapter. Raise the original error instead of the fallback error.
-                raise e
+            if isinstance(e, LMError) or isinstance(self, JSONAdapter) or not self.use_json_adapter_fallback:
+                # LM failures are not adapter-format failures and must not trigger another provider request.
+                raise
             return JSONAdapter()(lm, lm_kwargs, signature, demos, inputs)
 
     async def acall(
@@ -98,14 +93,9 @@ class ChatAdapter(Adapter):
             # fallback to JSONAdapter
             from dspy.adapters.json_adapter import JSONAdapter
 
-            if (
-                isinstance(e, ContextWindowExceededError)
-                or isinstance(self, JSONAdapter)
-                or not self.use_json_adapter_fallback
-            ):
-                # On context window exceeded error, already using JSONAdapter, or use_json_adapter_fallback is False
-                # we don't want to retry with a different adapter. Raise the original error instead of the fallback error.
-                raise e
+            if isinstance(e, LMError) or isinstance(self, JSONAdapter) or not self.use_json_adapter_fallback:
+                # LM failures are not adapter-format failures and must not trigger another provider request.
+                raise
             return await JSONAdapter().acall(lm, lm_kwargs, signature, demos, inputs)
 
     def format_field_description(self, signature: type[Signature]) -> str:
