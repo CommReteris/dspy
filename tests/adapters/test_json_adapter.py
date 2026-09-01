@@ -1,5 +1,6 @@
 from unittest import mock
 
+import litellm
 import pydantic
 import pytest
 from litellm.types.llms.openai import ResponseAPIUsage, ResponsesAPIResponse
@@ -739,6 +740,37 @@ async def test_json_adapter_fallback_to_json_mode_on_structured_output_failure_a
         # The second call should have used JSON mode
         _, second_call_kwargs = mock_acompletion.call_args_list[1]
         assert second_call_kwargs.get("response_format") == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_json_adapter_propagates_provider_errors_without_json_fallback() -> None:
+    class TestSignature(dspy.Signature):
+        question: str = dspy.InputField()
+        answer: str = dspy.OutputField(desc="String output field")
+
+    provider_requests: list[dict[str, object]] = []
+
+    async def unavailable_provider(**request: object) -> ModelResponse:
+        provider_requests.append(request)
+        raise litellm.APIError(
+            status_code=502,
+            message="The upstream model server disconnected.",
+            llm_provider="openrouter",
+            model="qwen/qwen3.5-9b",
+        )
+
+    program = dspy.Predict(TestSignature)
+    with mock.patch("litellm.acompletion", new=unavailable_provider):
+        with dspy.context(
+            lm=dspy.LM(model="openai/gpt-4o-mini", cache=False, num_retries=0),
+            adapter=dspy.JSONAdapter(),
+        ):
+            with pytest.raises(dspy.LMServerError) as raised:
+                await program.acall(question="Which entity is selected?")
+
+    assert raised.value.status == 502
+    assert len(provider_requests) == 1
+    assert isinstance(provider_requests[0]["response_format"], type)
 
 
 def test_error_message_on_json_adapter_failure():
